@@ -1,0 +1,1823 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stamp Loyalty Enterprise</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- QRCode.js untuk Generate QR Code Pelanggan -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- ZXing Library untuk Scan QR Code via Kamera -->
+    <script type="text/javascript" src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
+    <!-- SheetJS untuk Export Excel -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#fef2f2',
+                            100: '#fee2e2',
+                            500: '#ef4444',
+                            600: '#dc2626',
+                            700: '#b91c1c',
+                            800: '#991b1b',
+                            900: '#7f1d1d',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col pb-16 md:pb-0">
+
+    <!-- Notifikasi Toast -->
+    <div id="toast-container" class="fixed top-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+    <!-- Modal Container -->
+    <div id="modal-container" class="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm hidden flex items-center justify-center p-4"></div>
+
+    <!-- Container Utama Aplikasi -->
+    <div id="app" class="flex-1 flex flex-col">
+        <div class="flex items-center justify-center h-screen bg-brand-900 text-white">
+            <div class="text-center">
+                <i class="fas fa-spinner fa-spin text-4xl mb-4"></i>
+                <p class="text-lg font-medium">Memuat Sistem Stamp Loyalty...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase & Logika Utama -->
+    <script type="module">
+        // ==========================================
+        // KONFIGURASI APLIKASI & FIREBASE
+        // ==========================================
+        const IS_PREVIEW = false; // Ubah ke true jika ingin menguji dengan data dummy lokal
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAqo4N8uGmS7NaEfLfWsKgRH6mIJzN_Jzs",
+            authDomain: "loyalty-c750b.firebaseapp.com",
+            projectId: "loyalty-c750b",
+            storageBucket: "loyalty-c750b.firebasestorage.app",
+            messagingSenderId: "312172071219",
+            appId: "1:312172071219:web:d4e7def898a3375429d646"
+        };
+
+        // Import Firebase SDK (Modular v10+)
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, collection, doc, getDoc, setDoc, updateDoc, deleteDoc, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        let app, auth, db;
+        if (!IS_PREVIEW) {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+        }
+
+        // State Aplikasi
+        let currentUser = null; 
+        let userRole = null; 
+        let currentTab = 'dashboard';
+        let customerTab = 'stamp'; // 'stamp', 'referrals', 'history', 'rewards', 'profile'
+        let codeReader = null; 
+        let unsubCustomers = null;
+        let unsubTransactions = null;
+
+        let state = {
+            settings: { storeName: "Kopi Merah Nusantara", maxStamps: 10, expiryDays: 90, referralBonus: 2, birthdayBonus: 3 },
+            branches: [{ id: "branch-1", name: "Cabang Utama (Pusat)", active: true }],
+            admins: [
+                { id: "adm-1", email: "admin@merah.com", name: "Super Admin", role: "admin", permissions: ["dashboard", "scan", "customers", "rewards", "transactions", "staff", "settings", "announcements"] }
+            ],
+            customers: [],
+            rewards: [
+                { id: "rew-1", title: "Kopi Susu Signature Gratis", requiredStamps: 5, description: "Tukar 5 stamp untuk 1 cup kopi susu signature ukuran regular.", active: true },
+                { id: "rew-2", title: "Merchandise Tumbler Eksklusif", requiredStamps: 10, description: "Tukar 10 stamp untuk tumbler edisi terbatas.", active: true }
+            ],
+            transactions: [],
+            announcements: [
+                { id: "ann-1", title: "Promo Spesial Akhir Pekan!", content: "Dapatkan ekstra 2 stamp untuk setiap pembelian di atas Rp 50.000 setiap hari Sabtu & Minggu.", date: "2026-03-30", active: true }
+            ]
+        };
+
+        // Utils & Notifikasi
+        function showToast(message, type = 'success') {
+            const container = document.getElementById('toast-container');
+            if(!container) return;
+            const toast = document.createElement('div');
+            const bg = type === 'success' ? 'bg-emerald-600' : type === 'error' ? 'bg-red-600' : 'bg-amber-600';
+            toast.className = `${bg} text-white px-4 py-3 rounded-xl shadow-lg text-sm font-medium flex items-center gap-3 transition transform translate-y-2 opacity-0 pointer-events-auto`;
+            toast.innerHTML = `<i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'} text-lg"></i><span>${message}</span>`;
+            container.appendChild(toast);
+            setTimeout(() => toast.classList.remove('translate-y-2', 'opacity-0'), 50);
+            setTimeout(() => {
+                toast.classList.add('translate-y-2', 'opacity-0');
+                setTimeout(() => toast.remove(), 300);
+            }, 3500);
+        }
+
+        function showSuccessModal(title, message, onOk) {
+            const modal = document.getElementById('modal-container');
+            if(!modal) return;
+            modal.classList.remove('hidden');
+            modal.innerHTML = `
+                <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4">
+                    <div class="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto text-2xl">
+                        <i class="fas fa-check"></i>
+                    </div>
+                    <h3 class="font-bold text-slate-900 text-lg">${title}</h3>
+                    <p class="text-xs text-slate-600 leading-relaxed whitespace-pre-line">${message}</p>
+                    <button id="modal-ok-btn" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold py-3 rounded-xl text-xs transition shadow-lg shadow-brand-500/25">OK</button>
+                </div>
+            `;
+            document.getElementById('modal-ok-btn').onclick = () => {
+                closeModal();
+                if(typeof onOk === 'function') onOk();
+            };
+        }
+
+        function calculateTier(lifetimeStamps) {
+            if (lifetimeStamps >= 30) return 'VIP';
+            if (lifetimeStamps >= 15) return 'Gold';
+            return 'Silver';
+        }
+
+        function checkStampExpirations() {
+            const expiryDays = state.settings.expiryDays || 90;
+            const now = new Date();
+            state.customers.forEach(cust => {
+                if (cust.lastVisit && cust.stamps > 0) {
+                    const lastVisitDate = new Date(cust.lastVisit);
+                    const diffTime = now - lastVisitDate;
+                    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+                    if (diffDays > expiryDays) {
+                        cust.stamps = 0; 
+                    }
+                }
+            });
+        }
+
+        // Realtime Listeners Firestore
+        function setupRealtimeListeners() {
+            if (IS_PREVIEW) return;
+            if (unsubCustomers) unsubCustomers();
+            if (unsubTransactions) unsubTransactions();
+
+            import("https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js").then(({ onSnapshot, collection }) => {
+                unsubCustomers = onSnapshot(collection(db, "customers"), (snapshot) => {
+                    state.customers = [];
+                    snapshot.forEach(d => state.customers.push({ id: d.id, ...d.data() }));
+                    
+                    if (currentUser && userRole === 'customer') {
+                        const updatedMe = state.customers.find(c => c.id === currentUser.id);
+                        if (updatedMe) {
+                            const oldStamps = currentUser.stamps;
+                            currentUser = updatedMe;
+                            localStorage.setItem('loyalty_customer_session', JSON.stringify(currentUser));
+                            
+                            if (updatedMe.stamps > oldStamps) {
+                                const addedCount = updatedMe.stamps - oldStamps;
+                                showSuccessModal("Stampel Baru Ditambahkan!", `Yeay! Anda baru saja mendapatkan +${addedCount} stampel.\nTotal stamp aktif Anda saat ini: ${updatedMe.stamps}/${state.settings.maxStamps}`);
+                            }
+                            renderApp();
+                        }
+                    } else if (currentUser && userRole !== 'customer') {
+                        renderApp();
+                    }
+                }, (error) => {
+                    console.warn("Realtime customers listener warning:", error);
+                });
+
+                unsubTransactions = onSnapshot(collection(db, "transactions"), (snapshot) => {
+                    state.transactions = [];
+                    snapshot.forEach(d => state.transactions.push({ id: d.id, ...d.data() }));
+                    if (currentUser) {
+                        renderApp();
+                    }
+                }, (error) => {
+                    console.warn("Realtime transactions listener warning:", error);
+                });
+            });
+        }
+
+        let isDataLoaded = false;
+        async function loadFirestoreData() {
+            if (IS_PREVIEW || isDataLoaded) return;
+            try {
+                const setDocSnap = await getDoc(doc(db, "settings", "general"));
+                if (setDocSnap.exists()) {
+                    state.settings = setDocSnap.data();
+                } else {
+                    await setDoc(doc(db, "settings", "general"), state.settings);
+                }
+
+                const custSnap = await getDocs(collection(db, "customers"));
+                state.customers = [];
+                custSnap.forEach(d => state.customers.push({ id: d.id, ...d.data() }));
+
+                const rewSnap = await getDocs(collection(db, "rewards"));
+                if (!rewSnap.empty) {
+                    state.rewards = [];
+                    rewSnap.forEach(d => state.rewards.push({ id: d.id, ...d.data() }));
+                }
+
+                const trxSnap = await getDocs(collection(db, "transactions"));
+                state.transactions = [];
+                trxSnap.forEach(d => state.transactions.push({ id: d.id, ...d.data() }));
+
+                const annSnap = await getDocs(collection(db, "announcements"));
+                if (!annSnap.empty) {
+                    state.announcements = [];
+                    annSnap.forEach(d => state.announcements.push({ id: d.id, ...d.data() }));
+                }
+
+                const admSnap = await getDocs(collection(db, "admins"));
+                if (!admSnap.empty) {
+                    state.admins = [];
+                    admSnap.forEach(d => state.admins.push({ id: d.id, ...d.data() }));
+                }
+                isDataLoaded = true;
+                setupRealtimeListeners();
+            } catch (err) {
+                console.error("Gagal memuat data Firestore:", err);
+            }
+        }
+
+        async function initApp() {
+            if (!IS_PREVIEW) {
+                const savedCustomerSession = localStorage.getItem('loyalty_customer_session');
+                if (savedCustomerSession) {
+                    try {
+                        const parsedCust = JSON.parse(savedCustomerSession);
+                        currentUser = parsedCust;
+                        userRole = 'customer';
+                    } catch(e) {}
+                }
+
+                await loadFirestoreData();
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        const foundAdmin = state.admins.find(a => a.email === user.email) || {
+                            id: user.uid,
+                            email: user.email,
+                            name: user.displayName || "Admin Toko",
+                            role: "admin",
+                            permissions: ["dashboard", "scan", "customers", "rewards", "transactions", "staff", "settings", "announcements"]
+                        };
+                        currentUser = foundAdmin;
+                        userRole = foundAdmin.role || 'admin';
+                    } else if (!currentUser || userRole !== 'customer') {
+                        if (!localStorage.getItem('loyalty_customer_session')) {
+                            currentUser = null;
+                            userRole = null;
+                        }
+                    }
+                    checkStampExpirations();
+                    renderApp();
+                });
+            } else {
+                checkStampExpirations();
+                renderApp();
+            }
+        }
+
+        function renderApp() {
+            const appEl = document.getElementById('app');
+            if (!appEl) return;
+            if (!currentUser) {
+                appEl.innerHTML = renderAuthScreen();
+                setupAuthListeners();
+            } else if (userRole === 'customer') {
+                appEl.innerHTML = renderCustomerPortal();
+                setupCustomerListeners();
+                // Render QR code on desktop portal
+                setTimeout(() => {
+                    const qrEl = document.getElementById('customer-qr-desktop');
+                    if (qrEl) {
+                        qrEl.innerHTML = '';
+                        new QRCode(qrEl, {
+                            text: currentUser.barcodeId,
+                            width: 130,
+                            height: 130,
+                            colorDark: "#000000",
+                            colorLight: "#ffffff",
+                            correctLevel: QRCode.CorrectLevel.H
+                        });
+                    }
+                }, 50);
+            } else {
+                appEl.innerHTML = renderAdminDashboard();
+                setupAdminListeners();
+            }
+        }
+
+        // 1. Autentikasi
+        function renderAuthScreen() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const refCode = urlParams.get('ref') || '';
+
+            return `
+            <div class="min-h-screen bg-gradient-to-br from-brand-900 via-brand-800 to-slate-900 flex items-center justify-center p-4">
+                <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden p-8">
+                    <div class="text-center mb-6">
+                        <div class="w-16 h-16 bg-brand-100 text-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-3 text-2xl shadow-inner">
+                            <i class="fas fa-stamp"></i>
+                        </div>
+                        <h1 class="text-2xl font-bold text-slate-900">Stamp Loyalty</h1>
+                        <p class="text-sm text-slate-500">Sistem Loyalitas Pelanggan & Rewards</p>
+                    </div>
+
+                    <div class="flex bg-slate-100 p-1 rounded-xl mb-6">
+                        <button id="tab-login-btn" onclick="switchAuthTab('login')" class="flex-1 py-2 text-sm font-semibold rounded-lg bg-white text-brand-600 shadow-sm transition">Masuk</button>
+                        <button id="tab-register-btn" onclick="switchAuthTab('register')" class="flex-1 py-2 text-sm font-semibold rounded-lg text-slate-500 hover:text-slate-900 transition">Daftar Member</button>
+                    </div>
+
+                    <div id="form-login-container">
+                        <form id="login-form" class="space-y-4">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">No. HP (Member)</label>
+                                <input type="text" id="login-identifier" required class="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm" placeholder="••••••••">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Password</label>
+                                <input type="password" id="login-password" required class="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm" placeholder="••••••••">
+                            </div>
+                            <button type="submit" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold py-3 rounded-xl transition shadow-lg shadow-brand-500/25">Masuk ke Sistem</button>
+                        </form>
+                    </div>
+
+                    <div id="form-register-container" class="hidden">
+                        <form id="register-form" class="space-y-4">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Nama Lengkap</label>
+                                <input type="text" id="reg-name" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm" placeholder="Nama Anda">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Nomor WhatsApp / HP</label>
+                                <input type="text" id="reg-phone" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm" placeholder="08xxxxxxxxxx">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Tanggal Lahir</label>
+                                <input type="date" id="reg-birth" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Password</label>
+                                <input type="password" id="reg-password" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm" placeholder="••••••••">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Kode Referral (Opsional)</label>
+                                <input type="text" id="reg-referral" value="${refCode}" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm uppercase" placeholder="Contoh: BUDI123">
+                            </div>
+                            <button type="submit" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold py-3 rounded-xl transition shadow-lg shadow-brand-500/25">Daftar Sekarang</button>
+                        </form>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function setupAuthListeners() {
+            window.switchAuthTab = (tab) => {
+                const loginBtn = document.getElementById('tab-login-btn');
+                const regBtn = document.getElementById('tab-register-btn');
+                const loginForm = document.getElementById('form-login-container');
+                const regForm = document.getElementById('form-register-container');
+                if(!loginBtn || !regBtn) return;
+
+                if (tab === 'login') {
+                    loginBtn.className = "flex-1 py-2 text-sm font-semibold rounded-lg bg-white text-brand-600 shadow-sm transition";
+                    regBtn.className = "flex-1 py-2 text-sm font-semibold rounded-lg text-slate-500 hover:text-slate-900 transition";
+                    loginForm.classList.remove('hidden');
+                    regForm.classList.add('hidden');
+                } else {
+                    regBtn.className = "flex-1 py-2 text-sm font-semibold rounded-lg bg-white text-brand-600 shadow-sm transition";
+                    loginBtn.className = "flex-1 py-2 text-sm font-semibold rounded-lg text-slate-500 hover:text-slate-900 transition";
+                    regForm.classList.remove('hidden');
+                    loginForm.classList.add('hidden');
+                }
+            };
+
+            const loginFormEl = document.getElementById('login-form');
+            if (loginFormEl) {
+                loginFormEl.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const identifier = document.getElementById('login-identifier').value.trim();
+                    const password = document.getElementById('login-password').value;
+
+                    if (IS_PREVIEW) {
+                        let foundAdmin = state.admins.find(a => a.email === identifier && password === '123');
+                        if (foundAdmin) {
+                            currentUser = foundAdmin;
+                            userRole = foundAdmin.role;
+                            showToast(`Selamat datang, ${foundAdmin.name}!`);
+                            renderApp();
+                            return;
+                        }
+                        let foundCust = state.customers.find(c => c.phone === identifier && c.password === password);
+                        if (foundCust) {
+                            currentUser = foundCust;
+                            userRole = 'customer';
+                            localStorage.setItem('loyalty_customer_session', JSON.stringify(foundCust));
+                            showToast(`Selamat datang, ${foundCust.name}!`);
+                            renderApp();
+                            return;
+                        }
+                        showToast('Login gagal! Periksa kembali email/no HP dan password.', 'error');
+                    } else {
+                        try {
+                            const userCred = await signInWithEmailAndPassword(auth, identifier, password);
+                            const foundAdmin = state.admins.find(a => a.email === identifier) || {
+                                id: userCred.user.uid,
+                                email: identifier,
+                                name: "Admin Toko",
+                                role: "admin",
+                                permissions: ["dashboard", "scan", "customers", "rewards", "transactions", "staff", "settings", "announcements"]
+                            };
+                            currentUser = foundAdmin;
+                            userRole = foundAdmin.role || 'admin';
+                            showToast(`Selamat datang, ${currentUser.name}!`);
+                            renderApp();
+                            return;
+                        } catch (err) {
+                            let foundCust = state.customers.find(c => c.phone === identifier && c.password === password);
+                            if (foundCust) {
+                                currentUser = foundCust;
+                                userRole = 'customer';
+                                localStorage.setItem('loyalty_customer_session', JSON.stringify(foundCust));
+                                showToast(`Selamat datang, ${foundCust.name}!`);
+                                renderApp();
+                                return;
+                            }
+                            showToast('Login gagal: Email/No HP atau password salah.', 'error');
+                        }
+                    }
+                });
+            }
+
+            const regFormEl = document.getElementById('register-form');
+            if (regFormEl) {
+                regFormEl.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const name = document.getElementById('reg-name').value.trim();
+                    const phone = document.getElementById('reg-phone').value.trim();
+                    const birthDate = document.getElementById('reg-birth').value;
+                    const password = document.getElementById('reg-password').value;
+                    const referralInput = document.getElementById('reg-referral').value.trim().toUpperCase();
+
+                    if (state.customers.some(c => c.phone === phone)) {
+                        showToast('Nomor HP sudah terdaftar!', 'error');
+                        return;
+                    }
+
+                    const newId = 'cust-' + Date.now();
+                    const barcodeId = 'CUST-' + phone;
+                    const referralCode = name.substring(0, 3).toUpperCase() + Math.floor(100 + Math.random() * 900);
+                    const joinDateISO = new Date().toISOString().split('T')[0];
+
+                    let initialStamps = 0;
+                    let referrerFoundName = null;
+
+                    if (referralInput) {
+                        const referrer = state.customers.find(c => c.referralCode === referralInput);
+                        if (referrer) {
+                            referrerFoundName = referrer.name;
+                            referrer.stamps += state.settings.referralBonus;
+                            referrer.lifetimeStamps += state.settings.referralBonus;
+                            referrer.tier = calculateTier(referrer.lifetimeStamps);
+                            
+                            const refTrx = {
+                                id: 'trx-' + Date.now(),
+                                customerId: referrer.id,
+                                branchId: 'branch-1',
+                                type: 'REFERRAL_BONUS',
+                                stampsCount: state.settings.referralBonus,
+                                amount: 0,
+                                note: `Bonus Referral dari pendaftaran member baru: ${name}`,
+                                adminEmail: 'System Referral',
+                                timestamp: new Date().toISOString()
+                            };
+                            state.transactions.push(refTrx);
+
+                            if (!IS_PREVIEW) {
+                                await updateDoc(doc(db, "customers", referrer.id), {
+                                    stamps: referrer.stamps,
+                                    lifetimeStamps: referrer.lifetimeStamps,
+                                    tier: referrer.tier
+                                });
+                                await setDoc(doc(db, "transactions", refTrx.id), refTrx);
+                            }
+                        }
+                    }
+
+                    const newCustomer = {
+                        id: newId,
+                        phone,
+                        name,
+                        password,
+                        barcodeId,
+                        stamps: initialStamps,
+                        lifetimeStamps: initialStamps,
+                        tier: calculateTier(initialStamps),
+                        lastVisit: new Date().toISOString(),
+                        birthDate,
+                        referralCode,
+                        referredBy: referralInput,
+                        joinDate: joinDateISO
+                    };
+
+                    if (!IS_PREVIEW) {
+                        await setDoc(doc(db, "customers", newId), newCustomer);
+                    }
+
+                    state.customers.push(newCustomer);
+                    currentUser = newCustomer;
+                    userRole = 'customer';
+                    localStorage.setItem('loyalty_customer_session', JSON.stringify(newCustomer));
+                    
+                    if (referrerFoundName) {
+                        showToast(`Registrasi berhasil! Berhasil menggunakan kode referral dari ${referrerFoundName}.`);
+                    } else {
+                        showToast('Registrasi berhasil! Akun Anda telah aktif.');
+                    }
+                    renderApp();
+                });
+            }
+        }
+
+        // 2. Portal Pelanggan
+        function renderCustomerPortal() {
+            const activeAnnouncements = state.announcements.filter(a => a.active);
+            const myReferredList = state.customers.filter(c => c.referredBy === currentUser.referralCode);
+            const myTransactions = state.transactions.filter(t => t.customerId === currentUser.id).sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+            const max = state.settings.maxStamps;
+            const currentStamps = currentUser.stamps;
+
+            let stampsGridHTML = '';
+            for (let i = 1; i <= max; i++) {
+                const filled = i <= currentStamps;
+                stampsGridHTML += `
+                    <div class="aspect-square rounded-2xl flex flex-col items-center justify-center border-2 ${filled ? 'bg-brand-600 border-brand-600 text-white shadow-md shadow-brand-500/30' : 'bg-slate-100 border-slate-200 text-slate-400'} transition transform hover:scale-105">
+                        <i class="fas fa-${filled ? 'stamp' : 'circle'} text-xl mb-1"></i>
+                        <span class="text-xs font-bold">${i}</span>
+                    </div>
+                `;
+            }
+
+            return `
+            <div class="min-h-screen bg-slate-100 flex flex-col md:flex-row">
+                <!-- Sidebar Desktop untuk Member -->
+                <aside class="hidden md:flex w-64 bg-slate-900 text-slate-300 flex-col justify-between p-4 shadow-xl shrink-0">
+                    <div>
+                        <div class="flex items-center gap-3 px-3 py-4 mb-6 border-b border-slate-800">
+                            <div class="w-10 h-10 bg-brand-600 text-white rounded-xl flex items-center justify-center font-bold text-lg">
+                                ${currentUser.name.charAt(0)}
+                            </div>
+                            <div>
+                                <h1 class="font-bold text-white text-sm">${currentUser.name}</h1>
+                                <span class="text-xs text-brand-400">Tier: ${currentUser.tier}</span>
+                            </div>
+                        </div>
+
+                        <nav class="flex flex-col gap-1 w-full">
+                            <button onclick="switchCustomerTab('stamp')" class="${customerTab === 'stamp' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-stamp w-5"></i> Stempel Saya</button>
+                            <button onclick="switchCustomerTab('referrals')" class="${customerTab === 'referrals' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-users w-5"></i> Member Referral (${myReferredList.length})</button>
+                            <button onclick="switchCustomerTab('history')" class="${customerTab === 'history' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-history w-5"></i> History Stempel</button>
+                            <button onclick="switchCustomerTab('rewards')" class="${customerTab === 'rewards' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-gift w-5"></i> Katalog Reward</button>
+                            <button onclick="switchCustomerTab('profile')" class="${customerTab === 'profile' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-user-circle w-5"></i> Profil & Akun</button>
+                        </nav>
+                    </div>
+
+                    <div class="pt-4 border-t border-slate-800 space-y-2">
+                        <button onclick="openChangePasswordModal()" class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 py-2.5 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2">
+                            <i class="fas fa-key"></i> Ganti Password
+                        </button>
+                        <button id="logout-btn-desktop" class="w-full bg-brand-700 hover:bg-brand-800 text-white py-2.5 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2">
+                            <i class="fas fa-sign-out-alt"></i> Keluar
+                        </button>
+                    </div>
+                </aside>
+
+                <!-- Bottom Navigation Bar untuk Mobile (Member) -->
+                <div class="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900 text-slate-300 border-t border-slate-800 z-40 flex justify-around p-2 shadow-2xl">
+                    <button onclick="switchCustomerTab('stamp')" class="${customerTab === 'stamp' ? 'text-brand-500' : 'text-slate-400'} flex flex-col items-center p-1 text-[10px] font-semibold"><i class="fas fa-stamp text-lg mb-0.5"></i> Stempel</button>
+                    <button onclick="switchCustomerTab('referrals')" class="${customerTab === 'referrals' ? 'text-brand-500' : 'text-slate-400'} flex flex-col items-center p-1 text-[10px] font-semibold"><i class="fas fa-users text-lg mb-0.5"></i> Referral</button>
+                    <button onclick="switchCustomerTab('history')" class="${customerTab === 'history' ? 'text-brand-500' : 'text-slate-400'} flex flex-col items-center p-1 text-[10px] font-semibold"><i class="fas fa-history text-lg mb-0.5"></i> History</button>
+                    <button onclick="switchCustomerTab('rewards')" class="${customerTab === 'rewards' ? 'text-brand-500' : 'text-slate-400'} flex flex-col items-center p-1 text-[10px] font-semibold"><i class="fas fa-gift text-lg mb-0.5"></i> Reward</button>
+                    <button onclick="switchCustomerTab('profile')" class="${customerTab === 'profile' ? 'text-brand-500' : 'text-slate-400'} flex flex-col items-center p-1 text-[10px] font-semibold"><i class="fas fa-user-circle text-lg mb-0.5"></i> Profil</button>
+                </div>
+
+                <!-- Header Mobile Sederhana -->
+                <header class="md:hidden bg-brand-600 text-white px-4 py-3 shadow-md flex justify-between items-center">
+                    <div class="flex items-center gap-2">
+                        <div class="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center font-bold text-sm">
+                            ${currentUser.name.charAt(0)}
+                        </div>
+                        <h2 class="font-bold text-sm leading-tight">${currentUser.name}</h2>
+                    </div>
+                    <button id="logout-btn-mobile" class="bg-brand-700 px-3 py-1.5 rounded-lg text-xs font-semibold">
+                        <i class="fas fa-sign-out-alt"></i> Keluar
+                    </button>
+                </header>
+
+                <main class="flex-1 max-w-4xl w-full mx-auto p-4 md:p-8 space-y-6 mb-16 md:mb-0">
+                    ${activeAnnouncements.length > 0 && customerTab === 'stamp' ? `
+                    <div class="space-y-3">
+                        ${activeAnnouncements.map(ann => `
+                            <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 shadow-sm flex items-start gap-3">
+                                <div class="w-10 h-10 bg-amber-500 text-white rounded-xl flex items-center justify-center shrink-0 font-bold text-lg">
+                                    <i class="fas fa-bullhorn"></i>
+                                </div>
+                                <div class="flex-1">
+                                    <div class="flex justify-between items-center mb-1">
+                                        <h4 class="font-bold text-amber-900 text-sm">${ann.title}</h4>
+                                        <span class="text-[10px] text-amber-700 font-semibold">${ann.date}</span>
+                                    </div>
+                                    <p class="text-xs text-amber-800 leading-relaxed">${ann.content}</p>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>` : ''}
+
+                    <!-- 1. Menu Stempel Saya -->
+                    <div class="customer-section ${customerTab === 'stamp' ? '' : 'hidden'} space-y-6">
+                        <div class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-6">
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <h3 class="text-lg font-bold text-slate-900">Kartu Stamp Digital</h3>
+                                    <p class="text-xs text-slate-500">Masa aktif stamp dihitung ${state.settings.expiryDays} hari dari kunjungan terakhir.</p>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <div class="text-right">
+                                        <span class="text-2xl font-black text-brand-600">${currentUser.stamps}</span>
+                                        <span class="text-sm font-semibold text-slate-400">/ ${max} Stamp</span>
+                                    </div>
+                                    <button onclick="openQrModal()" class="md:hidden w-12 h-12 bg-brand-50 hover:bg-brand-100 text-brand-600 rounded-2xl flex items-center justify-center text-xl shadow-inner transition transform hover:scale-105" title="Tampilkan QR Code Keanggotaan">
+                                        <i class="fas fa-qrcode"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-5 gap-3">
+                                ${stampsGridHTML}
+                            </div>
+                            <div class="w-full bg-slate-100 h-3 rounded-full overflow-hidden">
+                                <div class="bg-brand-600 h-full transition-all duration-500" style="width: ${(currentUser.stamps / max) * 100}%"></div>
+                            </div>
+                        </div>
+
+                        <!-- QR Code Card di Desktop (Posisi nomor HP/barcode di bawah QR code) -->
+                        <div class="hidden md:flex bg-white rounded-3xl p-6 shadow-xl border border-slate-100 flex-col items-center text-center space-y-3 max-w-sm mx-auto">
+                            <h3 class="text-base font-bold text-slate-900">QR Code Keanggotaan</h3>
+                            <p class="text-xs text-slate-500">Tunjukkan QR Code ini kepada kasir saat bertransaksi.</p>
+                            <div id="customer-qr-desktop" class="bg-slate-50 p-4 rounded-2xl border border-slate-200 inline-block"></div>
+                            <div class="p-2 bg-brand-50 text-brand-800 font-mono text-xs font-bold rounded-lg w-full">
+                                ${currentUser.barcodeId}
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 2. Menu Member Referral -->
+                    <div class="customer-section ${customerTab === 'referrals' ? '' : 'hidden'} space-y-6">
+                        <div class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-4">
+                            <h3 class="text-lg font-bold text-slate-900"><i class="fas fa-share-alt text-brand-600 mr-2"></i> Ajak Teman & Daftar Member Referral</h3>
+                            <p class="text-xs text-slate-500">Bagikan link atau kode referral Anda dan dapatkan bonus stamp otomatis ketika teman Anda mendaftar!</p>
+                            <div class="flex items-center gap-2">
+                                <input type="text" readonly value="${window.location.origin}?ref=${currentUser.referralCode}" id="referral-link-input" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono text-slate-600">
+                                <button onclick="navigator.clipboard.writeText(document.getElementById('referral-link-input').value); showToast('Link referral disalin!');" class="bg-brand-600 hover:bg-brand-700 text-white px-4 py-2 rounded-xl text-xs font-semibold shrink-0">Salin Link</button>
+                            </div>
+                            <p class="text-xs font-semibold text-slate-700">Kode Referral Anda: <span class="text-brand-600 font-mono bg-brand-50 px-2 py-1 rounded">${currentUser.referralCode}</span></p>
+                            
+                            <hr class="border-slate-100 my-4">
+
+                            <h4 class="font-bold text-slate-800 text-sm">Daftar Semua Member yang Direkrut (${myReferredList.length} orang)</h4>
+                            <div class="overflow-x-auto max-h-80 overflow-y-auto">
+                                <table class="w-full text-left border-collapse text-sm">
+                                    <thead>
+                                        <tr class="bg-slate-50 border-b border-slate-200 text-slate-400 font-semibold text-xs uppercase sticky top-0">
+                                            <th class="py-2.5 px-3">Nama Member</th>
+                                            <th class="py-2.5 px-3">No. WhatsApp</th>
+                                            <th class="py-2.5 px-3">Tanggal Bergabung</th>
+                                            <th class="py-2.5 px-3">Tier</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100 text-xs">
+                                        ${myReferredList.length > 0 ? myReferredList.map(ref => `
+                                            <tr class="hover:bg-slate-50">
+                                                <td class="py-2.5 px-3 font-bold text-slate-900">${ref.name}</td>
+                                                <td class="py-2.5 px-3 text-slate-600">${ref.phone}</td>
+                                                <td class="py-2.5 px-3 text-slate-500">${ref.joinDate || '-'}</td>
+                                                <td class="py-2.5 px-3"><span class="px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-800">${ref.tier}</span></td>
+                                            </tr>
+                                        `).join('') : `<tr><td colspan="4" class="text-center py-6 text-slate-400">Belum ada member yang mendaftar melalui referral Anda.</td></tr>`}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 3. Menu History Stempel & Transaksi dengan Tinggi Statis & Scroll -->
+                    <div class="customer-section ${customerTab === 'history' ? '' : 'hidden'} space-y-6">
+                        <div class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-4">
+                            <h3 class="text-lg font-bold text-slate-900"><i class="fas fa-history text-brand-600 mr-2"></i> History Penambahan & Stempel</h3>
+                            <p class="text-xs text-slate-500">Catatan lengkap seluruh perolehan stempel dan penukaran reward Anda.</p>
+                            <div class="overflow-x-auto max-h-96 overflow-y-auto border border-slate-100 rounded-2xl">
+                                <table class="w-full text-left border-collapse text-sm">
+                                   <thead>
+                                        <tr class="bg-slate-50 border-b border-slate-200 text-slate-400 font-semibold text-xs uppercase sticky top-0 z-10 shadow-sm">
+                                            <th class="py-3 px-3 bg-slate-50">Waktu</th>
+                                            <th class="py-3 px-3 bg-slate-50">Tipe</th>
+                                            <th class="py-3 px-3 bg-slate-50">Stamp</th>
+                                            <th class="py-3 px-3 bg-slate-50">Keterangan</th>
+                                        </tr>
+                                   </thead>
+                                   <tbody class="divide-y divide-slate-100 text-xs">
+                                        ${myTransactions.length > 0 ? myTransactions.map(trx => `
+                                            <tr class="hover:bg-slate-50">
+                                                <td class="py-3 px-3 text-slate-500">${new Date(trx.timestamp).toLocaleString()}</td>
+                                                <td class="py-3 px-3"><span class="px-2 py-0.5 rounded-full font-bold ${trx.type === 'ADD_STAMP' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${trx.type}</span></td>
+                                                <td class="py-3 px-3 font-bold ${trx.stampsCount > 0 ? 'text-emerald-600' : 'text-red-600'}">${trx.stampsCount > 0 ? '+' + trx.stampsCount : trx.stampsCount}</td>
+                                                <td class="py-3 px-3 text-slate-600">${trx.note}</td>
+                                            </tr>
+                                        `).join('') : `<tr><td colspan="4" class="text-center py-6 text-slate-400">Belum ada riwayat transaksi stempel.</td></tr>`}
+                                   </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 4. Menu Katalog Reward -->
+                    <div class="customer-section ${customerTab === 'rewards' ? '' : 'hidden'} space-y-6">
+                        <div class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-4">
+                            <h3 class="text-lg font-bold text-slate-900"><i class="fas fa-gift text-brand-600 mr-2"></i> Katalog Reward Tersedia</h3>
+                            <p class="text-xs text-slate-500">Tukar stempel aktif Anda dengan berbagai hadiah menarik di bawah ini.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                ${state.rewards.map(rew => `
+                                    <div class="border border-slate-200 rounded-2xl p-4 flex flex-col justify-between">
+                                        <div>
+                                            <div class="flex justify-between items-start mb-2">
+                                                <h4 class="font-bold text-slate-800 text-sm">${rew.title}</h4>
+                                                <span class="bg-brand-100 text-brand-800 text-xs font-bold px-2.5 py-1 rounded-full">${rew.requiredStamps} Stamp</span>
+                                            </div>
+                                            <p class="text-xs text-slate-500 mb-4">${rew.description}</p>
+                                        </div>
+                                        <button onclick="claimReward('${rew.id}')" ${currentUser.stamps < rew.requiredStamps ? 'disabled class="w-full bg-slate-100 text-slate-400 font-semibold py-2 rounded-xl text-xs cursor-not-allowed"' : 'class="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold py-2 rounded-xl text-xs transition shadow-md"'}>
+                                            ${currentUser.stamps < rew.requiredStamps ? 'Stamp Belum Cukup' : 'Klaim Hadiah'}
+                                        </button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 5. Menu Profil & Akun -->
+                    <div class="customer-section ${customerTab === 'profile' ? '' : 'hidden'} space-y-6">
+                        <div class="bg-white rounded-3xl p-6 shadow-xl border border-slate-100 space-y-4">
+                            <h4 class="font-bold text-slate-900"><i class="fas fa-user-circle text-brand-600 mr-2"></i> Informasi Akun Profil</h4>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-slate-600">
+                                <p>Nama Lengkap: <span class="font-semibold text-slate-800">${currentUser.name}</span></p>
+                                <p>No. WhatsApp: <span class="font-semibold text-slate-800">${currentUser.phone}</span></p>
+                                <p>Tanggal Lahir: <span class="font-semibold text-slate-800">${currentUser.birthDate || '-'}</span></p>
+                                <p>Tanggal Join: <span class="font-semibold text-slate-800">${currentUser.joinDate || '-'}</span></p>
+                                <p>Total Stamp Seumur Hidup: <span class="font-semibold text-slate-800">${currentUser.lifetimeStamps}</span></p>
+                                <p>Tier Member: <span class="font-semibold text-brand-600">${currentUser.tier}</span></p>
+                            </div>
+                            <div class="pt-4 flex gap-3">
+                                <button onclick="openChangePasswordModal()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold px-4 py-2.5 rounded-xl text-xs transition">Ganti Password</button>
+                            </div>
+                        </div>
+                    </div>
+                </main>
+            </div>`;
+        }
+
+        function setupCustomerListeners() {
+            window.switchCustomerTab = (tab) => {
+                customerTab = tab;
+                renderApp();
+            };
+
+            const logoutDesktop = document.getElementById('logout-btn-desktop');
+            const logoutMobile = document.getElementById('logout-btn-mobile');
+            const handleLogout = async () => {
+                localStorage.removeItem('loyalty_customer_session');
+                if (!IS_PREVIEW) await signOut(auth);
+                currentUser = null;
+                userRole = null;
+                renderApp();
+            };
+
+            if(logoutDesktop) logoutDesktop.onclick = handleLogout;
+            if(logoutMobile) logoutMobile.onclick = handleLogout;
+
+            window.openQrModal = () => {
+                const modal = document.getElementById('modal-container');
+                modal.classList.remove('hidden');
+                modal.innerHTML = `
+                    <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4">
+                        <div class="flex justify-between items-center border-b border-slate-100 pb-2">
+                            <h3 class="font-bold text-slate-900 text-sm">QR Code Keanggotaan</h3>
+                            <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600"><i class="fas fa-times text-base"></i></button>
+                        </div>
+                        <p class="text-xs text-slate-500">Tunjukkan QR Code ini kepada kasir saat bertransaksi.</p>
+                        <div id="modal-qrcode-container" class="bg-slate-50 p-4 rounded-2xl border border-slate-200 inline-block mx-auto"></div>
+                        <div class="p-2 bg-brand-50 text-brand-800 font-mono text-xs font-bold rounded-lg inline-block">
+                            ${currentUser.barcodeId}
+                        </div>
+                        <button onclick="closeModal()" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 rounded-xl text-xs transition">Tutup</button>
+                    </div>
+                `;
+
+                new QRCode(document.getElementById('modal-qrcode-container'), {
+                    text: currentUser.barcodeId,
+                    width: 160,
+                    height: 160,
+                    colorDark: "#000000",
+                    colorLight: "#ffffff",
+                    correctLevel: QRCode.CorrectLevel.H
+                });
+            };
+
+            window.claimReward = async (rewardId) => {
+                const reward = state.rewards.find(r => r.id === rewardId);
+                if (!reward) return;
+                if (currentUser.stamps < reward.requiredStamps) {
+                    showToast('Stamp Anda belum mencukupi untuk klaim reward ini.', 'error');
+                    return;
+                }
+
+                currentUser.stamps -= reward.requiredStamps;
+                const newTrx = {
+                    id: 'trx-' + Date.now(),
+                    customerId: currentUser.id,
+                    branchId: 'branch-1',
+                    type: 'REDEEM_REWARD',
+                    stampsCount: -reward.requiredStamps,
+                    amount: 0,
+                    note: `Klaim Reward: ${reward.title}`,
+                    adminEmail: 'Self Customer',
+                    timestamp: new Date().toISOString()
+                };
+
+                state.transactions.push(newTrx);
+
+                if (!IS_PREVIEW) {
+                    await updateDoc(doc(db, "customers", currentUser.id), { stamps: currentUser.stamps });
+                    await setDoc(doc(db, "transactions", newTrx.id), newTrx);
+                }
+
+                localStorage.setItem('loyalty_customer_session', JSON.stringify(currentUser));
+                showSuccessModal("Klaim Reward Berhasil!", `Anda berhasil menukar reward: ${reward.title}. Silakan tunjukkan layar ini kepada kasir.`);
+                renderApp();
+            };
+        }
+
+        // 3. Dashboard Admin / Kasir dengan Scrollable Sidebar & Bottom Nav
+        function renderAdminDashboard() {
+            const allowedMenus = currentUser.permissions || ['dashboard', 'scan', 'customers', 'rewards', 'transactions', 'announcements', 'staff', 'settings'];
+            
+            return `
+            <div class="min-h-screen bg-slate-100 flex flex-col md:flex-row">
+                <!-- Sidebar Desktop Admin dengan Scroll & Semua Menu Terakomodasi -->
+                <aside class="hidden md:flex w-64 bg-slate-900 text-slate-300 flex-col justify-between p-4 shadow-xl shrink-0 h-screen sticky top-0 overflow-y-auto">
+                    <div>
+                        <div class="flex items-center gap-3 px-3 py-4 mb-6 border-b border-slate-800">
+                            <div class="w-10 h-10 bg-brand-600 text-white rounded-xl flex items-center justify-center font-bold text-lg">
+                                <i class="fas fa-stamp"></i>
+                            </div>
+                            <div>
+                                <h1 class="font-bold text-white text-sm">Stamp Loyalty</h1>
+                                <span class="text-xs text-brand-400 capitalize">${currentUser.role}: ${currentUser.name}</span>
+                            </div>
+                        </div>
+
+                        <nav class="flex flex-col gap-1 w-full pb-6">
+                            ${allowedMenus.includes('dashboard') ? `<button onclick="switchTab('dashboard')" class="${currentTab === 'dashboard' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-chart-pie w-5"></i> Dashboard</button>` : ''}
+                            ${allowedMenus.includes('scan') ? `<button onclick="switchTab('scan')" class="${currentTab === 'scan' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-qrcode w-5"></i> Scan & Stamp</button>` : ''}
+                            ${allowedMenus.includes('customers') ? `<button onclick="switchTab('customers')" class="${currentTab === 'customers' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-users w-5"></i> Pelanggan</button>` : ''}
+                            ${allowedMenus.includes('rewards') ? `<button onclick="switchTab('rewards')" class="${currentTab === 'rewards' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-gift w-5"></i> Reward</button>` : ''}
+                            ${allowedMenus.includes('transactions') ? `<button onclick="switchTab('transactions')" class="${currentTab === 'transactions' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-history w-5"></i> Riwayat</button>` : ''}
+                            ${allowedMenus.includes('announcements') ? `<button onclick="switchTab('announcements')" class="${currentTab === 'announcements' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-bullhorn w-5"></i> Info / Promo</button>` : ''}
+                            ${allowedMenus.includes('staff') ? `<button onclick="switchTab('staff')" class="${currentTab === 'staff' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-user-shield w-5"></i> Manajemen Staf</button>` : ''}
+                            ${allowedMenus.includes('settings') ? `<button onclick="switchTab('settings')" class="${currentTab === 'settings' ? 'bg-brand-600 text-white' : 'hover:bg-slate-800 text-slate-300'} flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition w-full text-left"><i class="fas fa-cog w-5"></i> Pengaturan</button>` : ''}
+                        </nav>
+                    </div>
+
+                    <div class="pt-4 border-t border-slate-800">
+                        <button id="admin-logout-btn" class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 py-2.5 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2">
+                            <i class="fas fa-sign-out-alt"></i> Keluar
+                        </button>
+                    </div>
+                </aside>
+
+                <!-- Bottom Navigation Bar Mobile Admin dengan Sistem Scroll Menyamping -->
+                <div class="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900 text-slate-300 border-t border-slate-800 z-40 flex overflow-x-auto p-2 shadow-2xl gap-2 no-scrollbar">
+                    ${allowedMenus.includes('dashboard') ? `<button onclick="switchTab('dashboard')" class="${currentTab === 'dashboard' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-chart-pie text-base mb-0.5"></i> Dash</button>` : ''}
+                    ${allowedMenus.includes('scan') ? `<button onclick="switchTab('scan')" class="${currentTab === 'scan' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-qrcode text-base mb-0.5"></i> Scan</button>` : ''}
+                    ${allowedMenus.includes('customers') ? `<button onclick="switchTab('customers')" class="${currentTab === 'customers' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-users text-base mb-0.5"></i> Member</button>` : ''}
+                    ${allowedMenus.includes('rewards') ? `<button onclick="switchTab('rewards')" class="${currentTab === 'rewards' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-gift text-base mb-0.5"></i> Reward</button>` : ''}
+                    ${allowedMenus.includes('transactions') ? `<button onclick="switchTab('transactions')" class="${currentTab === 'transactions' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-history text-base mb-0.5"></i> Riwayat</button>` : ''}
+                    ${allowedMenus.includes('announcements') ? `<button onclick="switchTab('announcements')" class="${currentTab === 'announcements' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-bullhorn text-base mb-0.5"></i> Info</button>` : ''}
+                    ${allowedMenus.includes('staff') ? `<button onclick="switchTab('staff')" class="${currentTab === 'staff' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-user-shield text-base mb-0.5"></i> Staf</button>` : ''}
+                    ${allowedMenus.includes('settings') ? `<button onclick="switchTab('settings')" class="${currentTab === 'settings' ? 'text-brand-500 bg-slate-800' : 'text-slate-400'} flex flex-col items-center px-3 py-1 rounded-xl text-[10px] font-semibold shrink-0"><i class="fas fa-cog text-base mb-0.5"></i> Set</button>` : ''}
+                </div>
+
+                <!-- Header Mobile Admin -->
+                <header class="md:hidden bg-brand-600 text-white px-4 py-3 shadow-md flex justify-between items-center">
+                    <h2 class="font-bold text-sm">Panel ${currentUser.role}</h2>
+                    <button id="admin-logout-mobile" class="bg-brand-700 px-3 py-1.5 rounded-lg text-xs font-semibold">Keluar</button>
+                </header>
+
+                <main class="flex-1 p-4 md:p-8 overflow-y-auto max-h-screen mb-16 md:mb-0">
+                    ${renderAdminTabContent()}
+                </main>
+            </div>`;
+        }
+
+        function renderAdminTabContent() {
+            switch(currentTab) {
+                case 'dashboard': return renderAdminDashboardHome();
+                case 'scan': return renderAdminScan();
+                case 'customers': return renderAdminCustomers();
+                case 'rewards': return renderAdminRewards();
+                case 'transactions': return renderAdminTransactions();
+                case 'announcements': return renderAdminAnnouncements();
+                case 'staff': return renderAdminStaff();
+                case 'settings': return renderAdminSettings();
+                default: return renderAdminDashboardHome();
+            }
+        }
+
+        function renderAdminDashboardHome() {
+            const totalCust = state.customers.length;
+            const totalStampsGiven = state.transactions.filter(t => t.type === 'ADD_STAMP').reduce((acc, t) => acc + t.stampsCount, 0);
+            
+            // Akumulasi total nominal transaksi toko
+            const totalSales = state.transactions.filter(t => t.type === 'ADD_STAMP').reduce((acc, t) => acc + (t.amount || 0), 0);
+
+            const redemptions = state.transactions.filter(t => t.type === 'REDEEM_REWARD');
+            const rewardClaimCounts = {};
+            redemptions.forEach(trx => {
+                const title = trx.note.replace('Klaim Reward: ', '');
+                rewardClaimCounts[title] = (rewardClaimCounts[title] || 0) + 1;
+            });
+
+            return `
+            <div class="space-y-6">
+                <div>
+                    <h2 class="text-2xl font-bold text-slate-900">Dashboard Utama</h2>
+                    <p class="text-sm text-slate-500">Ringkasan aktivitas loyalitas pelanggan toko Anda.</p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 flex items-center gap-4">
+                        <div class="w-14 h-14 bg-brand-50 text-brand-600 rounded-2xl flex items-center justify-center text-2xl font-bold">
+                            <i class="fas fa-users"></i>
+                        </div>
+                        <div>
+                            <p class="text-xs font-semibold uppercase text-slate-400">Total Pelanggan</p>
+                            <h3 class="text-2xl font-bold text-slate-900">${totalCust}</h3>
+                        </div>
+                    </div>
+                    <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 flex items-center gap-4">
+                        <div class="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center text-2xl font-bold">
+                            <i class="fas fa-stamp"></i>
+                        </div>
+                        <div>
+                            <p class="text-xs font-semibold uppercase text-slate-400">Total Stamp Diberikan</p>
+                            <h3 class="text-2xl font-bold text-slate-900">${totalStampsGiven}</h3>
+                        </div>
+                    </div>
+                    <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 flex items-center gap-4">
+                        <div class="w-14 h-14 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center text-2xl font-bold">
+                            <i class="fas fa-wallet"></i>
+                        </div>
+                        <div>
+                            <p class="text-xs font-semibold uppercase text-slate-400">Total Transaksi (Rupiah)</p>
+                            <h3 class="text-xl font-bold text-slate-900">Rp ${totalSales.toLocaleString('id-ID')}</h3>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="text-lg font-bold text-slate-900"><i class="fas fa-gift text-brand-600 mr-2"></i> Statistik Klaim Reward</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        ${Object.keys(rewardClaimCounts).length > 0 ? Object.entries(rewardClaimCounts).map(([title, count]) => `
+                            <div class="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex justify-between items-center">
+                                <div>
+                                    <h4 class="font-bold text-slate-800 text-sm">${title}</h4>
+                                    <p class="text-xs text-slate-500">Total diklaim oleh member</p>
+                                </div>
+                                <span class="bg-brand-600 text-white text-sm font-bold px-3 py-1.5 rounded-xl">${count}x</span>
+                            </div>
+                        `).join('') : `
+                            <p class="text-xs text-slate-400 col-span-3">Belum ada reward yang diklaim.</p>
+                        `}
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="text-lg font-bold text-slate-900"><i class="fas fa-trophy text-amber-500 mr-2"></i> Peringkat Pelanggan (Leaderboard)</h3>
+                    <div class="overflow-x-auto max-h-96 overflow-y-auto">
+                        <table class="w-full text-left border-collapse text-sm">
+                            <thead>
+                                <tr class="border-b border-slate-200 text-slate-400 font-semibold text-xs uppercase sticky top-0 bg-white">
+                                    <th class="py-3 px-4">Peringkat</th>
+                                    <th class="py-3 px-4">Nama Pelanggan</th>
+                                    <th class="py-3 px-4">Tier</th>
+                                    <th class="py-3 px-4">Total Stamp Aktif</th>
+                                    <th class="py-3 px-4">Lifetime Stamp</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                ${state.customers.slice().sort((a,b) => b.lifetimeStamps - a.lifetimeStamps).map((c, idx) => `
+                                    <tr class="hover:bg-slate-50">
+                                        <td class="py-3 px-4 font-bold text-slate-600">#${idx + 1}</td>
+                                        <td class="py-3 px-4 font-semibold text-slate-900">${c.name}</td>
+                                        <td class="py-3 px-4"><span class="px-2.5 py-1 rounded-full text-xs font-bold ${c.tier === 'VIP' ? 'bg-purple-100 text-purple-800' : c.tier === 'Gold' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-800'}">${c.tier}</span></td>
+                                        <td class="py-3 px-4 font-bold text-brand-600">${c.stamps}</td>
+                                        <td class="py-3 px-4 text-slate-600">${c.lifetimeStamps}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderAdminScan() {
+            return `
+            <div class="space-y-6 max-w-2xl mx-auto">
+                <div>
+                    <h2 class="text-2xl font-bold text-slate-900">Scan & Berikan Stamp</h2>
+                    <p class="text-sm text-slate-500">Pindai QR code pelanggan atau masukkan ID/No HP secara manual.</p>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-6">
+                    <div class="space-y-3">
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Kamera Scanner QR Code</label>
+                        <div id="video-container" class="w-full rounded-2xl overflow-hidden border border-slate-200 bg-slate-900 relative min-h-[240px]">
+                            <video id="video" class="w-full h-full object-cover"></video>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="start-scan-btn" class="flex-1 bg-brand-600 hover:bg-brand-700 text-white font-semibold py-2.5 rounded-xl text-xs transition">Mulai Kamera</button>
+                            <button id="stop-scan-btn" class="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold py-2.5 rounded-xl text-xs transition">Matikan Kamera</button>
+                        </div>
+                    </div>
+
+                    <hr class="border-slate-100">
+
+                    <div class="space-y-4">
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500">Atau Cari No. HP / Barcode ID</label>
+                        <div class="flex gap-2">
+                            <input type="text" id="scan-input-manual" class="flex-1 px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:border-brand-500 text-sm" placeholder="Contoh: 081234567890">
+                            <button onclick="handleManualScan()" class="bg-slate-900 hover:bg-slate-800 text-white px-6 rounded-xl text-sm font-semibold transition">Cari</button>
+                        </div>
+                    </div>
+
+                    <div id="scan-result-container" class="hidden pt-4 border-t border-slate-100 space-y-4"></div>
+                </div>
+            </div>`;
+        }
+
+        function renderAdminCustomers() {
+            return `
+            <div class="space-y-6">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-900">Kelola Pelanggan</h2>
+                        <p class="text-sm text-slate-500">Daftar seluruh member terdaftar beserta riwayat perolehan.</p>
+                    </div>
+                    <button onclick="exportCustomersExcel()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition flex items-center gap-2 shadow-md">
+                        <i class="fas fa-file-excel"></i> Export Excel
+                    </button>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="overflow-x-auto max-h-[500px] overflow-y-auto">
+                        <table class="w-full text-left border-collapse text-sm">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-slate-400 font-semibold text-xs uppercase sticky top-0 z-10 shadow-sm">
+                                    <th class="py-3 px-4 bg-slate-50">Nama & Telepon</th>
+                                    <th class="py-3 px-4 bg-slate-50">Tanggal Join</th>
+                                    <th class="py-3 px-4 bg-slate-50">Tier</th>
+                                    <th class="py-3 px-4 bg-slate-50">Stamp Aktif</th>
+                                    <th class="py-3 px-4 bg-slate-50">Referral Didapat</th>
+                                    <th class="py-3 px-4 bg-slate-50">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                ${state.customers.map(c => {
+                                    const referredCount = state.customers.filter(ref => ref.referredBy === c.referralCode).length;
+                                    return `
+                                        <tr class="hover:bg-slate-50">
+                                            <td class="py-3 px-4">
+                                                <p class="font-bold text-slate-900">${c.name}</p>
+                                                <p class="text-xs text-slate-500">${c.phone} | Kode: <code class="bg-slate-100 px-1 rounded">${c.referralCode}</code></p>
+                                            </td>
+                                            <td class="py-3 px-4 text-xs text-slate-600">${c.joinDate || '-'}</td>
+                                            <td class="py-3 px-4"><span class="px-2.5 py-1 rounded-full text-xs font-bold ${c.tier === 'VIP' ? 'bg-purple-100 text-purple-800' : c.tier === 'Gold' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-800'}">${c.tier}</span></td>
+                                            <td class="py-3 px-4 font-bold text-brand-600">${c.stamps}</td>
+                                            <td class="py-3 px-4 font-semibold text-slate-700">${referredCount} orang</td>
+                                            <td class="py-3 px-4">
+                                                <button onclick="openCustomerDetailModal('${c.id}')" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl text-xs font-semibold transition">Kelola Akun</button>
+                                            </td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderAdminRewards() {
+            return `
+            <div class="space-y-6 max-w-4xl mx-auto">
+                <div>
+                    <h2 class="text-2xl font-bold text-slate-900">Katalog Reward</h2>
+                    <p class="text-sm text-slate-500">Kelola daftar hadiah dan syarat penukaran stamp.</p>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="font-bold text-slate-900">Tambah Reward Baru</h3>
+                    <form id="add-reward-form" class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <input type="text" id="rew-title" placeholder="Nama Reward (e.g. Kopi Gratis)" required class="px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                        <input type="number" id="rew-stamps" placeholder="Jumlah Stamp" required class="px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                        <input type="text" id="rew-desc" placeholder="Deskripsi singkat" class="px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                        <button type="submit" class="md:col-span-3 bg-brand-600 hover:bg-brand-700 text-white font-semibold py-2.5 rounded-xl text-xs transition">Simpan Reward</button>
+                    </form>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="font-bold text-slate-900">Daftar Reward Aktif</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        ${state.rewards.map(rew => `
+                            <div class="border border-slate-200 rounded-2xl p-4 flex justify-between items-start">
+                                <div>
+                                    <h4 class="font-bold text-slate-900 text-sm">${rew.title}</h4>
+                                    <p class="text-xs text-slate-500 mb-2">${rew.description}</p>
+                                    <span class="bg-brand-100 text-brand-800 text-xs font-bold px-2 py-0.5 rounded-full">${rew.requiredStamps} Stamp</span>
+                                </div>
+                                <button onclick="deleteReward('${rew.id}')" class="text-red-500 hover:text-red-700 text-xs font-semibold"><i class="fas fa-trash"></i></button>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderAdminTransactions() {
+            return `
+            <div class="space-y-6">
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                    <div>
+                        <h2 class="text-2xl font-bold text-slate-900">Riwayat Stempel & Transaksi</h2>
+                        <p class="text-sm text-slate-500">Log seluruh aktivitas penambahan stamp, nominal transaksi, dan klaim reward.</p>
+                    </div>
+
+                    <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center gap-3 w-full md:w-auto">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs font-semibold text-slate-500">Dari:</span>
+                            <input type="date" id="del-start-date" class="px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs">
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs font-semibold text-slate-500">Sampai:</span>
+                            <input type="date" id="del-end-date" class="px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs">
+                        </div>
+                        <button onclick="deleteTransactionsByDateRange()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 shrink-0 shadow-sm">
+                            <i class="fas fa-trash-alt"></i> Hapus Log (Rentang)
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="overflow-x-auto max-h-[500px] overflow-y-auto">
+                        <table class="w-full text-left border-collapse text-sm">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-slate-400 font-semibold text-xs uppercase sticky top-0 z-10 shadow-sm">
+                                    <th class="py-3 px-4 bg-slate-50">Waktu</th>
+                                    <th class="py-3 px-4 bg-slate-50">Pelanggan</th>
+                                    <th class="py-3 px-4 bg-slate-50">Tipe</th>
+                                    <th class="py-3 px-4 bg-slate-50">Nominal Transaksi</th>
+                                    <th class="py-3 px-4 bg-slate-50">Stamp</th>
+                                    <th class="py-3 px-4 bg-slate-50">Catatan</th>
+                                    <th class="py-3 px-4 bg-slate-50">Pencatat</th>
+                                    <th class="py-3 px-4 bg-slate-50">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                ${state.transactions.map(trx => {
+                                    const cust = state.customers.find(c => c.id === trx.customerId);
+                                    return `
+                                        <tr class="hover:bg-slate-50">
+                                            <td class="py-3 px-4 text-xs text-slate-500">${new Date(trx.timestamp).toLocaleString()}</td>
+                                            <td class="py-3 px-4 font-semibold text-slate-900">${cust ? cust.name : 'Unknown'}</td>
+                                            <td class="py-3 px-4"><span class="px-2.5 py-1 rounded-full text-xs font-bold ${trx.type === 'ADD_STAMP' ? 'bg-emerald-100 text-emerald-800' : trx.type === 'REFERRAL_BONUS' ? 'bg-purple-100 text-purple-800' : 'bg-amber-100 text-amber-800'}">${trx.type}</span></td>
+                                            <td class="py-3 px-4 font-semibold text-slate-800">${trx.amount ? 'Rp ' + trx.amount.toLocaleString('id-ID') : '-'}</td>
+                                            <td class="py-3 px-4 font-bold ${trx.stampsCount > 0 ? 'text-emerald-600' : 'text-red-600'}">${trx.stampsCount > 0 ? '+' + trx.stampsCount : trx.stampsCount}</td>
+                                            <td class="py-3 px-4 text-xs text-slate-600">${trx.note}</td>
+                                            <td class="py-3 px-4 text-xs text-slate-500">${trx.adminEmail}</td>
+                                            <td class="py-3 px-4">
+                                                <button onclick="deleteTransactionLog('${trx.id}')" class="text-red-500 hover:text-red-700 text-xs font-semibold" title="Hapus log tanpa mempengaruhi poin pelanggan"><i class="fas fa-trash"></i> Hapus Log</button>
+                                            </td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderAdminAnnouncements() {
+            return `
+            <div class="space-y-6 max-w-4xl mx-auto">
+                <div>
+                    <h2 class="text-2xl font-bold text-slate-900">Kelola Informasi & Pengumuman</h2>
+                    <p class="text-sm text-slate-500">Pesan yang Anda buat akan langsung tampil di beranda portal pelanggan.</p>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="font-bold text-slate-900">Buat Pengumuman Baru</h3>
+                    <form id="add-announcement-form" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Judul Pengumuman</label>
+                            <input type="text" id="ann-title" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm" placeholder="Contoh: Promo Weekend Spesial!">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Isi Pesan / Informasi</label>
+                            <textarea id="ann-content" required rows="3" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm" placeholder="Tuliskan informasi promosi atau pengumuman di sini..."></textarea>
+                        </div>
+                        <button type="submit" class="bg-brand-600 hover:bg-brand-700 text-white font-semibold px-6 py-2.5 rounded-xl text-xs transition shadow-sm">Publikasikan Pengumuman</button>
+                    </form>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="font-bold text-slate-900">Daftar Pengumuman Aktif</h3>
+                    <div class="space-y-3">
+                        ${state.announcements.map(ann => `
+                            <div class="border border-slate-200 rounded-2xl p-4 flex justify-between items-start">
+                                <div>
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <h4 class="font-bold text-slate-900 text-sm">${ann.title}</h4>
+                                        <span class="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">${ann.date}</span>
+                                    </div>
+                                    <p class="text-xs text-slate-600">${ann.content}</p>
+                                </div>
+                                <button onclick="deleteAnnouncement('${ann.id}')" class="text-red-500 hover:text-red-700 text-xs font-semibold shrink-0"><i class="fas fa-trash"></i></button>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderAdminStaff() {
+            return `
+            <div class="space-y-6 max-w-4xl mx-auto">
+                <div>
+                    <h2 class="text-2xl font-bold text-slate-900">Manajemen Admin & Kasir</h2>
+                    <p class="text-sm text-slate-500">Buat akun staf baru dan tentukan hak akses menu mereka.</p>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="font-bold text-slate-900">Tambah Akun Staf Baru</h3>
+                    <form id="add-staff-form" class="space-y-4">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Nama Staf</label>
+                                <input type="text" id="staff-name" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Email Staf</label>
+                                <input type="email" id="staff-email" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Password</label>
+                                <input type="password" id="staff-password" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Role / Peran</label>
+                                <select id="staff-role" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                                    <option value="cashier">Kasir (Hanya Scan & Dashboard)</option>
+                                    <option value="admin">Admin (Custom Hak Akses)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Hak Akses Menu</label>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="dashboard" checked class="rounded text-brand-600"> Dashboard</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="scan" checked class="rounded text-brand-600"> Scan & Stamp</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="customers" class="rounded text-brand-600"> Kelola Pelanggan</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="rewards" class="rounded text-brand-600"> Katalog Reward</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="transactions" class="rounded text-brand-600"> Riwayat Stempel</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="announcements" class="rounded text-brand-600"> Info / Pengumuman</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="staff" class="rounded text-brand-600"> Manajemen Staf</label>
+                                <label class="flex items-center gap-2"><input type="checkbox" name="perm" value="settings" class="rounded text-brand-600"> Pengaturan</label>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="bg-brand-600 hover:bg-brand-700 text-white font-semibold px-6 py-2.5 rounded-xl text-xs transition">Simpan Akun Staf</button>
+                    </form>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <h3 class="font-bold text-slate-900">Daftar Akun Staf Aktif</h3>
+                    <div class="space-y-3">
+                        ${state.admins.map(adm => `
+                            <div class="border border-slate-200 rounded-2xl p-4 flex justify-between items-center">
+                                <div>
+                                    <h4 class="font-bold text-slate-900 text-sm">${adm.name} <span class="text-xs bg-brand-100 text-brand-800 px-2 py-0.5 rounded-full ml-2">${adm.role}</span></h4>
+                                    <p class="text-xs text-slate-500">${adm.email}</p>
+                                    <p class="text-xs text-slate-400 mt-1">Akses: ${(adm.permissions || []).join(', ')}</p>
+                                </div>
+                                ${adm.email !== 'admin@merah.com' ? `<button onclick="deleteStaff('${adm.id}')" class="text-red-500 hover:text-red-700 text-xs font-semibold"><i class="fas fa-trash"></i></button>` : ''}
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        function renderAdminSettings() {
+            return `
+            <div class="space-y-6 max-w-2xl mx-auto">
+                <div>
+                    <h2 class="text-2xl font-bold text-slate-900">Pengaturan Toko & Sistem</h2>
+                    <p class="text-sm text-slate-500">Konfigurasi maksimal stamp per kartu, bonus referral, masa aktif stamp, dll.</p>
+                </div>
+
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200">
+                    <form id="settings-form" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Nama Toko / Bisnis</label>
+                            <input type="text" id="set-storename" value="${state.settings.storeName}" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Maksimal Stamp per Kartu</label>
+                            <input type="number" id="set-maxstamps" value="${state.settings.maxStamps}" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Masa Aktif Stamp (Hari dari Kunjungan Terakhir)</label>
+                            <input type="number" id="set-expiry" value="${state.settings.expiryDays}" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm" placeholder="Contoh: 90">
+                            <p class="text-[11px] text-slate-400 mt-1">Jika pelanggan tidak berkunjung melewati jumlah hari ini, stamp aktif akan otomatis di-reset ke 0 (Lifetime & Tier tetap terjaga).</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Bonus Stamp Referral</label>
+                            <input type="number" id="set-refbonus" value="${state.settings.referralBonus}" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                        </div>
+                        <button type="submit" class="bg-brand-600 hover:bg-brand-700 text-white font-semibold px-6 py-2.5 rounded-xl text-xs transition">Simpan Pengaturan</button>
+                    </form>
+                </div>
+            </div>`;
+        }
+
+        function setupAdminListeners() {
+            window.switchTab = (tab) => {
+                currentTab = tab;
+                renderApp();
+            };
+
+            const adminLogoutBtn = document.getElementById('admin-logout-btn');
+            const adminLogoutMobile = document.getElementById('admin-logout-mobile');
+            const handleAdminLogout = async () => {
+                if (!IS_PREVIEW) await signOut(auth);
+                currentUser = null;
+                userRole = null;
+                renderApp();
+            };
+
+            if (adminLogoutBtn) adminLogoutBtn.onclick = handleAdminLogout;
+            if (adminLogoutMobile) adminLogoutMobile.onclick = handleAdminLogout;
+
+            if (currentTab === 'scan') {
+                const startBtn = document.getElementById('start-scan-btn');
+                const stopBtn = document.getElementById('stop-scan-btn');
+
+                if (startBtn) {
+                    startBtn.addEventListener('click', () => {
+                        try {
+                            codeReader = new ZXing.BrowserQRCodeReader();
+                            codeReader.decodeFromVideoDevice(undefined, 'video', (result, err) => {
+                                if (result) {
+                                    handleScannedCode(result.text);
+                                }
+                            }).catch(err => {
+                                console.warn(err);
+                                showToast('Gagal mengakses kamera!', 'error');
+                            });
+                        } catch(e) {
+                            showToast('Kamera tidak didukung browser ini.', 'error');
+                        }
+                    });
+                }
+                if (stopBtn) {
+                    stopBtn.addEventListener('click', () => {
+                        if (codeReader) {
+                            codeReader.reset();
+                            codeReader = null;
+                        }
+                    });
+                }
+            }
+
+            const rewForm = document.getElementById('add-reward-form');
+            if (rewForm) {
+                rewForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const title = document.getElementById('rew-title').value.trim();
+                    const requiredStamps = parseInt(document.getElementById('rew-stamps').value);
+                    const description = document.getElementById('rew-desc').value.trim();
+
+                    const newRew = { id: 'rew-' + Date.now(), title, requiredStamps, description, active: true };
+                    state.rewards.push(newRew);
+                    if (!IS_PREVIEW) {
+                        await setDoc(doc(db, "rewards", newRew.id), newRew);
+                    }
+                    showToast('Reward baru berhasil ditambahkan!');
+                    renderApp();
+                });
+            }
+
+            const annForm = document.getElementById('add-announcement-form');
+            if (annForm) {
+                annForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const title = document.getElementById('ann-title').value.trim();
+                    const content = document.getElementById('ann-content').value.trim();
+                    const dateISO = new Date().toISOString().split('T')[0];
+
+                    const newAnn = { id: 'ann-' + Date.now(), title, content, date: dateISO, active: true };
+                    state.announcements.push(newAnn);
+                    if (!IS_PREVIEW) {
+                        await setDoc(doc(db, "announcements", newAnn.id), newAnn);
+                    }
+                    showToast('Pengumuman berhasil dipublikasikan ke member!');
+                    renderApp();
+                });
+            }
+
+            const staffForm = document.getElementById('add-staff-form');
+            if (staffForm) {
+                staffForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const name = document.getElementById('staff-name').value.trim();
+                    const email = document.getElementById('staff-email').value.trim();
+                    const password = document.getElementById('staff-password').value;
+                    const role = document.getElementById('staff-role').value;
+                    const permissions = Array.from(document.querySelectorAll('input[name="perm"]:checked')).map(el => el.value);
+
+                    const newStaff = { id: 'adm-' + Date.now(), name, email, password, role, permissions };
+                    state.admins.push(newStaff);
+                    if (!IS_PREVIEW) {
+                        await setDoc(doc(db, "admins", newStaff.id), newStaff);
+                    }
+                    showToast('Akun staf berhasil dibuat!');
+                    renderApp();
+                });
+            }
+
+            const setForm = document.getElementById('settings-form');
+            if (setForm) {
+                setForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    state.settings.storeName = document.getElementById('set-storename').value.trim();
+                    state.settings.maxStamps = parseInt(document.getElementById('set-maxstamps').value);
+                    state.settings.expiryDays = parseInt(document.getElementById('set-expiry').value);
+                    state.settings.referralBonus = parseInt(document.getElementById('set-refbonus').value);
+                    
+                    if (!IS_PREVIEW) {
+                        await setDoc(doc(db, "settings", "general"), state.settings);
+                    }
+                    showToast('Pengaturan berhasil diperbarui!');
+                    renderApp();
+                });
+            }
+        }
+
+        // Modal Kelola Akun Pelanggan & Ganti Password
+        window.openCustomerDetailModal = (customerId) => {
+            const customer = state.customers.find(c => c.id === customerId);
+            if(!customer) return;
+
+            const referredList = state.customers.filter(c => c.referredBy === customer.referralCode);
+            const custTrx = state.transactions.filter(t => t.customerId === customer.id && t.type === 'ADD_STAMP');
+            const totalSpent = custTrx.reduce((acc, t) => acc + (t.amount || 0), 0);
+
+            const modal = document.getElementById('modal-container');
+            modal.classList.remove('hidden');
+            modal.innerHTML = `
+                <div class="bg-white w-full max-w-lg rounded-3xl p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+                    <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+                        <h3 class="font-bold text-slate-900 text-base">Kelola Akun: ${customer.name}</h3>
+                        <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600"><i class="fas fa-times text-lg"></i></button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs text-slate-600">
+                        <p>No. WhatsApp: <span class="font-semibold text-slate-800">${customer.phone}</span></p>
+                        <p>Tanggal Join: <span class="font-semibold text-slate-800">${customer.joinDate || '-'}</span></p>
+                        <p>Total Stamp Aktif: <span class="font-semibold text-brand-600">${customer.stamps}</span></p>
+                        <p>Total Transaksi: <span class="font-semibold text-emerald-600">Rp ${totalSpent.toLocaleString('id-ID')}</span></p>
+                        <p>Tier Level: <span class="font-semibold text-slate-800">${customer.tier}</span></p>
+                        <p>Kode Referral: <span class="font-semibold text-slate-800">${customer.referralCode}</span></p>
+                    </div>
+
+                    <div class="p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                        <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider">Daftar Member dari Referral ${customer.name} (${referredList.length} orang)</h4>
+                        ${referredList.length > 0 ? `
+                            <ul class="space-y-1 text-xs text-slate-700 max-h-32 overflow-y-auto">
+                                ${referredList.map(ref => `<li class="bg-white p-2 rounded-xl border border-slate-200 flex justify-between"><span>${ref.name} (${ref.phone})</span><span class="text-slate-400">Join: ${ref.joinDate || '-'}</span></li>`).join('')}
+                            </ul>
+                        ` : '<p class="text-xs text-slate-400">Belum ada member yang mendaftar menggunakan kode referral ini.</p>'}
+                    </div>
+
+                    <div class="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+                        <h4 class="font-bold text-slate-800 text-xs uppercase tracking-wider">Reset Password Member</h4>
+                        <p class="text-xs text-slate-500">Reset password pelanggan ini kembali ke password default <code>123456</code>.</p>
+                        <button onclick="resetCustomerPassword('${customer.id}')" class="w-full bg-amber-600 hover:bg-amber-700 text-white font-semibold py-2.5 rounded-xl text-xs transition shadow-sm">Reset Password ke 123456</button>
+                    </div>
+                    <button onclick="closeModal()" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 rounded-xl text-xs transition">Tutup</button>
+                </div>
+            `;
+        };
+
+        window.resetCustomerPassword = async (customerId) => {
+            const customer = state.customers.find(c => c.id === customerId);
+            if(!customer) return;
+            customer.password = '123456';
+            if (!IS_PREVIEW) {
+                await updateDoc(doc(db, "customers", customer.id), { password: '123456' });
+            }
+            showToast(`Password member ${customer.name} berhasil direset ke "123456"`);
+            closeModal();
+        };
+
+        window.openChangePasswordModal = () => {
+            const modal = document.getElementById('modal-container');
+            modal.classList.remove('hidden');
+            modal.innerHTML = `
+                <div class="bg-white w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
+                    <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+                        <h3 class="font-bold text-slate-900 text-base">Ganti Password Akun</h3>
+                        <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600"><i class="fas fa-times text-lg"></i></button>
+                    </div>
+                    <form id="change-pass-form" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Password Lama</label>
+                            <input type="password" id="old-pass" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Password Baru</label>
+                            <input type="password" id="new-pass" required class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm" placeholder="Minimal 6 karakter">
+                        </div>
+                        <button type="submit" class="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold py-3 rounded-xl text-xs transition shadow-md">Simpan Password Baru</button>
+                    </form>
+                </div>
+            `;
+
+            document.getElementById('change-pass-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const oldP = document.getElementById('old-pass').value;
+                const newP = document.getElementById('new-pass').value;
+
+                if (currentUser.password !== oldP) {
+                    showToast('Password lama salah!', 'error');
+                    return;
+                }
+
+                currentUser.password = newP;
+                if (!IS_PREVIEW) {
+                    await updateDoc(doc(db, "customers", currentUser.id), { password: newP });
+                }
+                localStorage.setItem('loyalty_customer_session', JSON.stringify(currentUser));
+                showToast('Password berhasil diperbarui!');
+                closeModal();
+            });
+        };
+
+        window.closeModal = () => {
+            const modal = document.getElementById('modal-container');
+            if(modal) modal.classList.add('hidden');
+        };
+
+        window.handleManualScan = () => {
+            const inputEl = document.getElementById('scan-input-manual');
+            if(!inputEl) return;
+            const queryVal = inputEl.value.trim();
+            const customer = state.customers.find(c => c.phone === queryVal || c.barcodeId === queryVal);
+            if (!customer) {
+                showToast('Pelanggan tidak ditemukan!', 'error');
+                return;
+            }
+            displayCustomerScanResult(customer);
+        };
+
+        window.handleScannedCode = (codeText) => {
+            if (codeReader) {
+                codeReader.reset();
+                codeReader = null;
+            }
+            const customer = state.customers.find(c => c.barcodeId === codeText || c.phone === codeText);
+            if (!customer) {
+                showToast(`QR Code tidak dikenali: ${codeText}`, 'error');
+                return;
+            }
+            displayCustomerScanResult(customer);
+        };
+
+        function displayCustomerScanResult(customer) {
+            const container = document.getElementById('scan-result-container');
+            if(!container) return;
+            container.classList.remove('hidden');
+            container.innerHTML = `
+                <div class="bg-brand-50 border border-brand-100 rounded-2xl p-4 space-y-4">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h4 class="font-bold text-slate-900 text-base">${customer.name}</h4>
+                            <p class="text-xs text-slate-500">HP: ${customer.phone} | Tier: <span class="font-bold text-brand-600">${customer.tier}</span></p>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-xl font-black text-brand-600">${customer.stamps}</span>
+                            <span class="text-xs text-slate-400">/ ${state.settings.maxStamps} Stamp</span>
+                        </div>
+                    </div>
+
+                    <!-- Input Jumlah Nominal Transaksi (Rupiah) -->
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1">Nominal Transaksi (Rp)</label>
+                        <input type="number" id="stamp-trx-amount" value="50000" class="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm bg-white" placeholder="Contoh: 50000">
+                    </div>
+
+                    <div class="flex gap-2 pt-1">
+                        <button onclick="addStampToCustomer('${customer.id}', 1)" class="flex-1 bg-brand-600 hover:bg-brand-700 text-white font-semibold py-3 rounded-xl text-xs transition shadow-sm">+1 Stamp & Catat Transaksi</button>
+                        <button onclick="addStampToCustomer('${customer.id}', 2)" class="flex-1 bg-brand-700 hover:bg-brand-800 text-white font-semibold py-3 rounded-xl text-xs transition shadow-sm">+2 Stamp & Catat Transaksi</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        window.addStampToCustomer = async (customerId, count) => {
+            const customer = state.customers.find(c => c.id === customerId);
+            if (!customer) return;
+
+            const amountInput = document.getElementById('stamp-trx-amount');
+            const trxAmount = amountInput ? parseFloat(amountInput.value) || 0 : 0;
+
+            customer.stamps += count;
+            customer.lifetimeStamps += count;
+            customer.tier = calculateTier(customer.lifetimeStamps);
+            customer.lastVisit = new Date().toISOString();
+
+            const newTrx = {
+                id: 'trx-' + Date.now(),
+                customerId: customer.id,
+                branchId: 'branch-1',
+                type: 'ADD_STAMP',
+                stampsCount: count,
+                amount: trxAmount,
+                note: `Penambahan ${count} stamp (${trxAmount ? 'Rp ' + trxAmount.toLocaleString('id-ID') : ''}) oleh kasir`,
+                adminEmail: currentUser.email || 'Admin Toko',
+                timestamp: new Date().toISOString()
+            };
+
+            state.transactions.push(newTrx);
+
+            if (!IS_PREVIEW) {
+                try {
+                    await updateDoc(doc(db, "customers", customer.id), {
+                        stamps: customer.stamps,
+                        lifetimeStamps: customer.lifetimeStamps,
+                        tier: customer.tier,
+                        lastVisit: customer.lastVisit
+                    });
+                    await setDoc(doc(db, "transactions", newTrx.id), newTrx);
+                } catch(e) {
+                    console.error("Gagal update firestore:", e);
+                }
+            }
+
+            showSuccessModal("Berhasil Memberikan Stampel!", `Berhasil menambahkan ${count} stamp untuk ${customer.name}.\nNominal Transaksi: Rp ${trxAmount.toLocaleString('id-ID')}\nTotal stamp aktif saat ini: ${customer.stamps}/${state.settings.maxStamps}`);
+            displayCustomerScanResult(customer);
+        };
+
+        window.deleteTransactionLog = async (trxId) => {
+            const idx = state.transactions.findIndex(t => t.id === trxId);
+            if (idx !== -1) {
+                state.transactions.splice(idx, 1);
+                if (!IS_PREVIEW) {
+                    await deleteDoc(doc(db, "transactions", trxId));
+                }
+                showToast('Log transaksi berhasil dihapus tanpa mempengaruhi poin pelanggan.');
+                renderApp();
+            }
+        };
+
+        window.deleteTransactionsByDateRange = async () => {
+            const startDateEl = document.getElementById('del-start-date');
+            const endDateEl = document.getElementById('del-end-date');
+            if(!startDateEl || !endDateEl || !startDateEl.value || !endDateEl.value) {
+                showToast('Harap pilih rentang tanggal mulai dan selesai terlebih dahulu!', 'error');
+                return;
+            }
+
+            const start = new Date(startDateEl.value);
+            start.setHours(0,0,0,0);
+            const end = new Date(endDateEl.value);
+            end.setHours(23,59,59,999);
+
+            const toDelete = state.transactions.filter(t => {
+                const tDate = new Date(t.timestamp);
+                return tDate >= start && tDate <= end;
+            });
+
+            state.transactions = state.transactions.filter(t => {
+                const tDate = new Date(t.timestamp);
+                return tDate < start || tDate > end;
+            });
+
+            if (!IS_PREVIEW) {
+                for (let trx of toDelete) {
+                    await deleteDoc(doc(db, "transactions", trx.id));
+                }
+            }
+
+            showToast(`Berhasil menghapus log transaksi pada rentang tanggal tersebut tanpa mempengaruhi poin member!`);
+            renderApp();
+        };
+
+        window.deleteReward = async (rewId) => {
+            state.rewards = state.rewards.filter(r => r.id !== rewId);
+            if (!IS_PREVIEW) {
+                await deleteDoc(doc(db, "rewards", rewId));
+            }
+            showToast('Reward dihapus.');
+            renderApp();
+        };
+
+        window.deleteAnnouncement = async (annId) => {
+            state.announcements = state.announcements.filter(a => a.id !== annId);
+            if (!IS_PREVIEW) {
+                await deleteDoc(doc(db, "announcements", annId));
+            }
+            showToast('Pengumuman dihapus.');
+            renderApp();
+        };
+
+        window.deleteStaff = async (admId) => {
+            state.admins = state.admins.filter(a => a.id !== admId);
+            if (!IS_PREVIEW) {
+                await deleteDoc(doc(db, "admins", admId));
+            }
+            showToast('Akun staf dihapus.');
+            renderApp();
+        };
+
+        window.exportCustomersExcel = () => {
+            const wsData = state.customers.map(c => {
+                const referredCount = state.customers.filter(ref => ref.referredBy === c.referralCode).length;
+                const cTrx = state.transactions.filter(t => t.customerId === c.id && t.type === 'ADD_STAMP');
+                const totalSpent = cTrx.reduce((acc, t) => acc + (t.amount || 0), 0);
+
+                return {
+                    "ID Member": c.id,
+                    "Nama": c.name,
+                    "No. HP": c.phone,
+                    "Tanggal Join": c.joinDate || '-',
+                    "Tier": c.tier,
+                    "Stamp Aktif": c.stamps,
+                    "Total Belanja (Rp)": totalSpent,
+                    "Lifetime Stamp": c.lifetimeStamps,
+                    "Total Referral": referredCount,
+                    "Kunjungan Terakhir": c.lastVisit ? new Date(c.lastVisit).toLocaleDateString() : '-',
+                    "Kode Referral": c.referralCode
+                };
+            });
+            const ws = XLSX.utils.json_to_sheet(wsData);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Data Pelanggan");
+            XLSX.writeFile(wb, "Laporan_Pelanggan_Loyalty.xlsx");
+            showToast('File Excel berhasil di-download!');
+        };
+
+        window.addEventListener('DOMContentLoaded', () => {
+            initApp();
+        });
+    </script>
+</body>
+</html>
